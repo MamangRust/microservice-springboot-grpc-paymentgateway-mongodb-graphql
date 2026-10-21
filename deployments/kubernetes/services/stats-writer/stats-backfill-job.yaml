@@ -1,0 +1,71 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stats-backfill
+  namespace: payment-gateway
+spec:
+  # Manual job: apply it explicitly when historical financial rows need to be
+  # materialized into ClickHouse. Re-running is safe — ClickHouse is append-only
+  # and the source query is deterministic per backfill window.
+  backoffLimit: 3
+  template:
+    spec:
+      serviceAccountName: app
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: wait-for-deps
+          image: busybox:1.35
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "[INIT] Waiting for source MongoDB (financial) + ClickHouse..."
+              # The backfill reads aggregated volume directly from the financial
+              # MongoDB (transactions collection) and writes to ClickHouse.
+              until nc -z mongo.payment-gateway.svc.cluster.local 27017 \
+                && nc -z clickhouse.payment-gateway.svc.cluster.local 8123; do
+                echo "Dependencies not ready yet. Retrying in 5 seconds..."
+                sleep 5
+              done
+              echo "[INIT] All dependencies are ready!"
+      containers:
+        - name: stats-backfill
+          image: ghcr.io/__GHCR_OWNER__/springboot-paymentgateway/stats-writer:latest
+          imagePullPolicy: IfNotPresent
+          args: ["backfill"]
+          env:
+            # Run the embedded one-shot backfill (CommandLineRunner) instead of the
+            # Kafka consumer; the app also disables the web stack in this mode.
+            - name: APP_BACKFILL_ENABLED
+              value: "true"
+            # Source is MongoDB now (financial context, same instance as the
+            # domain services); TRANSACTION_DB_* points at pg_financial.
+            - name: TRANSACTION_DB_HOST
+              value: "mongo.payment-gateway.svc.cluster.local"
+            - name: TRANSACTION_DB_PORT
+              value: "27017"
+            - name: TRANSACTION_DB_NAME
+              value: "pg_financial"
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      restartPolicy: OnFailure

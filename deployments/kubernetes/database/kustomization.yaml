@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# MongoDB (satu instance; DB per-context sebagai database terpisah) — menggantikan
+# PostgreSQL + PgBouncer. Service connect via <MODULE>_DB_HOST/_DB_NAME
+# (lihat core/configmaps.yaml).
+resources:
+  - mongo.yaml # StatefulSet + headless Service -> mongo:27017
+  - clickhouse.yaml # StatefulSet + Service -> OLAP (stats-reader/stats-writer)
